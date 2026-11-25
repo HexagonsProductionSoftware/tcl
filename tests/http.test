@@ -476,8 +476,10 @@ test http-4.14 {http::Event} {
 test http-4.15 {http::Event} {
     # This test may fail if you use a proxy server.  That is to be
     # expected and is not a problem with Tcl.
+    # The host is in the .invalid domain (RFC 6761), which never resolves;
+    # tcl.tk answers any name with a wildcard DNS record.
     set code [catch {
-	set token [http::geturl //not_a_host.tcl.tk -timeout 1000 -command {#}]
+	set token [http::geturl //not_a_host.invalid -timeout 1000 -command {#}]
 	http::wait $token
 	http::status $token
     } err]

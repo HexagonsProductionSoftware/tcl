@@ -1,0 +1,5 @@
+# What nmake -f makefile.vc leaves behind (.fossil-settings/ignore-glob for git).
+nmakehlp.exe
+nmakehlp.obj
+Release_*/
+Debug_*/

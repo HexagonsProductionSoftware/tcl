@@ -1009,6 +1009,32 @@ TcpCloseProc(instanceData, interp)
     SocketInfo *infoPtr = (SocketInfo *) instanceData;
     /* TIP #218 */
     int errorCode = 0;
+    ThreadSpecificData *tsdPtr =
+	    (ThreadSpecificData *) TclThreadDataKeyGet(&dataKey);
+
+    /*
+     * Make sure that the socket thread can no longer find the structure in
+     * the socket list. Normally TcpThreadActionProc removed it when the
+     * channel was cut from this thread. But at exit, TclFinalizeIOSubsystem
+     * calls this procedure directly for a channel that an interpreter still
+     * references, and the socket thread runs until TclpFinalizeSockets.
+     * A message queued for the socket before closesocket made the thread
+     * walk the list into the freed structure.
+     */
+
+    if ((tsdPtr != NULL) && (tsdPtr->socketListLock != NULL)) {
+	SocketInfo **nextPtrPtr;
+
+	WaitForSingleObject(tsdPtr->socketListLock, INFINITE);
+	for (nextPtrPtr = &(tsdPtr->socketList); (*nextPtrPtr) != NULL;
+		nextPtrPtr = &((*nextPtrPtr)->nextPtr)) {
+	    if ((*nextPtrPtr) == infoPtr) {
+		(*nextPtrPtr) = infoPtr->nextPtr;
+		break;
+	    }
+	}
+	SetEvent(tsdPtr->socketListLock);
+    }
 
     /*
      * Check that WinSock is initialized; do not call it if not, to
@@ -1031,11 +1057,10 @@ TcpCloseProc(instanceData, interp)
         }
     }
 
-    /* TIP #218. Removed the code removing the structure
-     * from the global socket list. This is now done by
-     * the thread action callbacks, and only there. This
-     * happens before this code is called. We can free
-     * without fear of damanging the list.
+    /* TIP #218. The thread action callback removes the structure
+     * from the socket list before this code is called (and the code
+     * above does so for a channel closed at exit). We can free
+     * without fear of damaging the list.
      */
     ckfree((char *) infoPtr);
     return errorCode;

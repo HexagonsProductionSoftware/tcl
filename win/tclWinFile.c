@@ -1594,7 +1594,8 @@ NativeIsExec(nativePath)
 	 */
 	if ((_wcsicmp(path+len-3,L"exe") == 0)
 		|| (_wcsicmp(path+len-3,L"com") == 0)
-		|| (_wcsicmp(path+len-3,L"bat") == 0)) {
+		|| (_wcsicmp(path+len-3,L"bat") == 0)
+		|| (_wcsicmp(path+len-3, L"cmd") == 0)) {
 	    return 1;
 	}
     } else {
@@ -1611,7 +1612,8 @@ NativeIsExec(nativePath)
 	     */
 	    if ((stricmp(p, "exe") == 0)
 		    || (stricmp(p, "com") == 0)
-		    || (stricmp(p, "bat") == 0)) {
+		    || (stricmp(p, "bat") == 0)
+			|| (stricmp(p, "cmd") == 0)) {
 		/*
 		 * File that ends with .exe, .com, or .bat is executable.
 		 */

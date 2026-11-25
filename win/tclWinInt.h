@@ -23,9 +23,16 @@
  * The following specifies how much stack space TclpCheckStackSpace()
  * ensures is available.  TclpCheckStackSpace() is called by Tcl_EvalObj()
  * to help avoid overflowing the stack in the case of infinite recursion.
+ * On Win64 the stack frames are larger: there, regexp near the recursion
+ * limit needs more than 32 KB (stack-3.1, Bug 947070), so reserve twice
+ * as much.
  */
 
+#ifdef _WIN64
+#define TCL_WIN_STACK_THRESHOLD 0x10000
+#else
 #define TCL_WIN_STACK_THRESHOLD 0x8000
+#endif
 
 #ifdef BUILD_tcl
 # undef TCL_STORAGE_CLASS
@@ -158,6 +165,7 @@ EXTERN TclWinProcs *tclWinProcs;
  * stubs table.
  */
 
+EXTERN int		TclWinGetSuiteMask (void);
 EXTERN void		TclWinEncodingsCleanup();
 EXTERN void		TclWinResetInterfaceEncodings();
 EXTERN void		TclWinInit(HINSTANCE hInst);

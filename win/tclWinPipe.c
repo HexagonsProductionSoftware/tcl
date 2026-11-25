@@ -1063,13 +1063,13 @@ TclpCreateProcess(
 	 * as a sink.
 	 */
 
-	if ((TclWinGetPlatformId() == VER_PLATFORM_WIN32_WINDOWS) 
+	if (((TclWinGetPlatformId() == VER_PLATFORM_WIN32_WINDOWS))
 		&& (applType == APPL_DOS)) {
 	    if (CreatePipe(&h, &startInfo.hStdOutput, &secAtts, 0) != FALSE) {
 		CloseHandle(h);
 	    }
 	} else {
-	    startInfo.hStdOutput = CreateFileA("NUL:", GENERIC_WRITE, 0,
+		startInfo.hStdOutput = CreateFileA("NUL:", GENERIC_WRITE, 0,
 		    &secAtts, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	}
     } else {
@@ -1078,8 +1078,13 @@ TclpCreateProcess(
     }
     if (startInfo.hStdOutput == INVALID_HANDLE_VALUE) {
 	TclWinConvertError(GetLastError());
-	Tcl_AppendResult(interp, "couldn't duplicate output handle: ",
-		Tcl_PosixError(interp), (char *) NULL);
+	if (outputHandle == INVALID_HANDLE_VALUE) {
+		Tcl_AppendResult(interp, "couldn't create nul output handle: ",
+			Tcl_PosixError(interp), (char *) NULL);
+	} else {
+		Tcl_AppendResult(interp, "couldn't duplicate output handle: ",
+			Tcl_PosixError(interp), (char *) NULL);
+	}
 	goto end;
     }
 
@@ -1088,17 +1093,33 @@ TclpCreateProcess(
 	 * If handle was not set, errors should be sent to an infinitely
 	 * deep sink.
 	 */
-
-	startInfo.hStdError = CreateFileA("NUL:", GENERIC_WRITE, 0,
-		&secAtts, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		startInfo.hStdError = CreateFileA("NUL:", GENERIC_WRITE, 0,
+			&secAtts, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (startInfo.hStdError == INVALID_HANDLE_VALUE) {
+			Tcl_AppendResult(interp, "Trying to open nul file handle ...", (char *) NULL);
+			startInfo.hStdError = CreateFileA("NUL:", GENERIC_WRITE, 0,
+				&secAtts, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+			if (startInfo.hStdError == INVALID_HANDLE_VALUE) {
+				Tcl_AppendResult(interp, "Trying to duplicate output handle ...", (char *) NULL);
+				DuplicateHandle(hProcess, startInfo.hStdOutput, hProcess, &startInfo.hStdError, 
+								0, TRUE, DUPLICATE_SAME_ACCESS);	
+			} else {
+				Tcl_ResetResult(interp);
+			}
+		}
     } else {
 	DuplicateHandle(hProcess, errorHandle, hProcess, &startInfo.hStdError, 
 		0, TRUE, DUPLICATE_SAME_ACCESS);
     } 
     if (startInfo.hStdError == INVALID_HANDLE_VALUE) {
 	TclWinConvertError(GetLastError());
-	Tcl_AppendResult(interp, "couldn't duplicate error handle: ",
-		Tcl_PosixError(interp), (char *) NULL);
+	if (errorHandle == INVALID_HANDLE_VALUE) {
+		Tcl_AppendResult(interp, "couldn't create nul error handle: ",
+			Tcl_PosixError(interp), (char *) NULL);
+	} else {
+		Tcl_AppendResult(interp, "couldn't duplicate error handle: ",
+			Tcl_PosixError(interp), (char *) NULL);
+	}
 	goto end;
     }
     /* 
@@ -1369,7 +1390,7 @@ ApplicationType(interp, originalName, fullName)
     Tcl_DString nameBuf, ds;
     CONST TCHAR *nativeName;
     WCHAR nativeFullPath[MAX_PATH];
-    static const char extensions[][5] = {"", ".com", ".exe", ".bat"};
+    static const char extensions[][5] = {"", ".com", ".exe", ".bat", ".cmd"};
 
     /* Look for the program as an external program.  First try the name
      * as it is, then try adding .com, .exe, and .bat, in that order, to
@@ -1491,7 +1512,7 @@ ApplicationType(interp, originalName, fullName)
 	return APPL_NONE;
     }
 
-    if ((applType == APPL_DOS) || (applType == APPL_WIN3X)) {
+    if (applType == APPL_WIN3X) {
 	/* 
 	 * Replace long path name of executable with short path name for 
 	 * 16-bit applications.  Otherwise the application may not be able
@@ -1526,97 +1547,244 @@ ApplicationType(interp, originalName, fullName)
  *----------------------------------------------------------------------
  */
 
+static const char*
+BuildCmdLineBypassBS(
+	const char* current,
+	const char** bspos
+) {
+	/* mark first backslash possition */
+	if (!*bspos) {
+		*bspos = current;
+	}
+	do {
+		current++;
+	} while (*current == '\\');
+	return current;
+}
+
+static void
+QuoteCmdLineBackslash(
+	Tcl_DString* dsPtr,
+	const char* start,
+	const char* current,
+	const char* bspos
+) {
+	if (!bspos) {
+		if (current > start) { /* part before current (special) */
+			Tcl_DStringAppend(dsPtr, start, (int)(current - start));
+		}
+	}
+	else {
+		if (bspos > start) { /* part before first backslash */
+			Tcl_DStringAppend(dsPtr, start, (int)(bspos - start));
+		}
+		while (bspos++ < current) { /* each backslash twice */
+			Tcl_DStringAppend(dsPtr, "\\\\", 2);
+		}
+	}
+}
+
+static const char*
+QuoteCmdLinePart(
+	Tcl_DString* dsPtr,
+	const char* start,
+	const char* special,
+	const char* specMetaChars,
+	const char** bspos
+) {
+	if (!*bspos) {
+		/* rest before special (before quote) */
+		QuoteCmdLineBackslash(dsPtr, start, special, NULL);
+		start = special;
+	}
+	else {
+		/* rest before first backslash and backslashes into new quoted block */
+		QuoteCmdLineBackslash(dsPtr, start, *bspos, NULL);
+		start = *bspos;
+	}
+	/*
+	 * escape all special chars enclosed in quotes like `"..."`, note that here we
+	 * don't must escape `\` (with `\`), because it's outside of the main quotes,
+	 * so `\` remains `\`, but important - not at end of part, because results as
+	 * before the quote,  so `%\%\` should be escaped as `"%\%"\\`).
+	 */
+	Tcl_DStringAppend(dsPtr, "\"", 1); /* opening escape quote-char */
+	do {
+		*bspos = NULL;
+		special++;
+		if (*special == '\\') {
+			/* bypass backslashes (and mark first backslash possition)*/
+			special = BuildCmdLineBypassBS(special, bspos);
+			if (*special == '\0') break;
+		}
+	} while (*special && strchr(specMetaChars, *special));
+	if (!*bspos) {
+		/* unescaped rest before quote */
+		QuoteCmdLineBackslash(dsPtr, start, special, NULL);
+	}
+	else {
+		/* unescaped rest before first backslash (rather belongs to the main block) */
+		QuoteCmdLineBackslash(dsPtr, start, *bspos, NULL);
+	}
+	Tcl_DStringAppend(dsPtr, "\"", 1); /* closing escape quote-char */
+	return special;
+}
+
 static void
 BuildCommandLine(
-    CONST char *executable,	/* Full path of executable (including 
-				 * extension).  Replacement for argv[0]. */
-    int argc,			/* Number of arguments. */
-    CONST char **argv,		/* Argument strings in UTF. */
-    Tcl_DString *linePtr)	/* Initialized Tcl_DString that receives the
+	const char* executable,	/* Full path of executable (including
+				 * extension). Replacement for argv[0]. */
+	int argc,			/* Number of arguments. */
+	const char** argv,		/* Argument strings in UTF. */
+	Tcl_DString* linePtr)	/* Initialized Tcl_DString that receives the
 				 * command line (TCHAR). */
 {
-    CONST char *arg, *start, *special;
-    int quote, i;
-    Tcl_DString ds;
+	const char* arg, * start, * special, * bspos;
+	int quote = 0, i;
+	Tcl_DString ds;
 
-    Tcl_DStringInit(&ds);
+	/* characters to enclose in quotes if unpaired quote flag set */
+	const static char* specMetaChars = "&|^<>!()%";
+	/* characters to enclose in quotes in any case (regardless unpaired-flag) */
+	const static char* specMetaChars2 = "%";
 
-    /*
-     * Prime the path.  Add a space separator if we were primed with
-     * something.
-     */
+	/* Quote flags:
+	 *   CL_ESCAPE   - escape argument;
+	 *   CL_QUOTE    - enclose in quotes;
+	 *   CL_UNPAIRED - previous arguments chain contains unpaired quote-char;
+	 */
+	enum { CL_ESCAPE = 1, CL_QUOTE = 2, CL_UNPAIRED = 4 };
 
-    Tcl_DStringAppend(&ds, Tcl_DStringValue(linePtr), -1);
-    if (Tcl_DStringLength(&ds) > 0) Tcl_DStringAppend(&ds, " ", 1);
+	Tcl_DStringInit(&ds);
 
-    for (i = 0; i < argc; i++) {
-	if (i == 0) {
-	    arg = executable;
-	} else {
-	    arg = argv[i];
-	    Tcl_DStringAppend(&ds, " ", 1);
+	/*
+	 * Prime the path. Add a space separator if we were primed with something.
+	 */
+
+	Tcl_DStringAppend(&ds, Tcl_DStringValue(linePtr), -1);
+	if (Tcl_DStringLength(linePtr) > 0) {
+		Tcl_DStringAppend(&ds, " ", 1);
 	}
 
-	quote = 0;
-	if (arg[0] == '\0') {
-	    quote = 1;
-	} else {
-	    int count;
-	    Tcl_UniChar ch;
-	    for (start = arg; *start != '\0'; start += count) {
-	        count = Tcl_UtfToUniChar(start, &ch);
-		if (Tcl_UniCharIsSpace(ch)) { /* INTL: ISO space. */
-		    quote = 1;
-		    break;
+	for (i = 0; i < argc; i++) {
+		if (i == 0) {
+			arg = executable;
 		}
-	    }
-	}
-	if (quote) {
-	    Tcl_DStringAppend(&ds, "\"", 1);
-	}
-	start = arg;	    
-	for (special = arg; ; ) {
-	    if ((*special == '\\') && 
-		    (special[1] == '\\' || special[1] == '"' || (quote && special[1] == '\0'))) {
-		Tcl_DStringAppend(&ds, start, (int) (special - start));
-		start = special;
-		while (1) {
-		    special++;
-		    if (*special == '"' || (quote && *special == '\0')) {
-			/* 
-			 * N backslashes followed a quote -> insert 
-			 * N * 2 + 1 backslashes then a quote.
-			 */
-
-			Tcl_DStringAppend(&ds, start,
-				(int) (special - start));
-			break;
-		    }
-		    if (*special != '\\') {
-			break;
-		    }
+		else {
+			arg = argv[i];
+			Tcl_DStringAppend(&ds, " ", 1);
 		}
-		Tcl_DStringAppend(&ds, start, (int) (special - start));
-		start = special;
-	    }
-	    if (*special == '"') {
-		Tcl_DStringAppend(&ds, start, (int) (special - start));
-		Tcl_DStringAppend(&ds, "\\\"", 2);
-		start = special + 1;
-	    }
-	    if (*special == '\0') {
-		break;
-	    }
-	    special++;
+
+		quote &= ~(CL_ESCAPE | CL_QUOTE); /* reset escape flags */
+		bspos = NULL;
+		if (arg[0] == '\0') {
+			quote = CL_QUOTE;
+		}
+		else {
+			int count;
+			Tcl_UniChar ch;
+			for (start = arg;
+				*start != '\0' &&
+				(quote & (CL_ESCAPE | CL_QUOTE)) != (CL_ESCAPE | CL_QUOTE);
+				start += count
+				) {
+				count = Tcl_UtfToUniChar(start, &ch);
+				if (count > 1) continue;
+				if (Tcl_UniCharIsSpace(ch)) {
+					quote |= CL_QUOTE; /* quote only */
+					if (bspos) { /* if backslash found - escape & quote */
+						quote |= CL_ESCAPE;
+						break;
+					}
+
+					continue;
+				}
+				if (strchr(specMetaChars, *start)) {
+					quote |= (CL_ESCAPE | CL_QUOTE); /*escape & quote */
+					break;
+				}
+				if (*start == '"') {
+
+					quote |= CL_ESCAPE; /* escape only */
+					continue;
+				}
+				if (*start == '\\') {
+
+
+					bspos = start;
+					if (quote & CL_QUOTE) { /* if quote - escape & quote */
+						quote |= CL_ESCAPE;
+						break;
+					}
+					continue;
+				}
+			}
+			bspos = NULL;
+		}
+		if (quote & CL_QUOTE) {
+
+
+			/* start of argument (main opening quote-char) */
+
+			Tcl_DStringAppend(&ds, "\"", 1);
+		}
+		if (!(quote & CL_ESCAPE)) {
+			/* nothing to escape */
+			Tcl_DStringAppend(&ds, arg, -1);
+		}
+		else {
+			start = arg;
+			for (special = arg; *special != '\0'; ) {
+				/* position of `\` is important before quote or at end (equal `\"` because quoted) */
+				if (*special == '\\') {
+					/* bypass backslashes (and mark first backslash possition)*/
+					special = BuildCmdLineBypassBS(special, &bspos);
+					if (*special == '\0') break;
+				}
+				/* ["] */
+				if (*special == '"') {
+					quote ^= CL_UNPAIRED; /* invert unpaired flag - observe unpaired quotes */
+					/* add part before (and escape backslashes before quote) */
+					QuoteCmdLineBackslash(&ds, start, special, bspos);
+					bspos = NULL;
+
+
+					/* escape using backslash */
+					Tcl_DStringAppend(&ds, "\\\"", 2);
+					start = ++special;
+					continue;
+				}
+				/* unpaired (escaped) quote causes special handling on meta-chars */
+				if ((quote & CL_UNPAIRED) && strchr(specMetaChars, *special)) {
+					special = QuoteCmdLinePart(&ds, start, special, specMetaChars, &bspos);
+
+					/* start to current or first backslash */
+					start = !bspos ? special : bspos;
+					continue;
+				}
+				/* special case for % - should be enclosed always (paired also) */
+				if (strchr(specMetaChars2, *special)) {
+					special = QuoteCmdLinePart(&ds, start, special, specMetaChars2, &bspos);
+					/* start to current or first backslash */
+					start = !bspos ? special : bspos;
+					continue;
+				}
+				/* other not special (and not meta) character */
+				bspos = NULL; /* reset last backslash possition (not interesting) */
+				special++;
+			}
+			/* rest of argument (and escape backslashes before closing main quote) */
+			QuoteCmdLineBackslash(&ds, start, special,
+				(quote & CL_QUOTE) ? bspos : NULL);
+		}
+		if (quote & CL_QUOTE) {
+			/* end of argument (main closing quote-char) */
+			Tcl_DStringAppend(&ds, "\"", 1);
+		}
 	}
-	Tcl_DStringAppend(&ds, start, (int) (special - start));
-	if (quote) {
-	    Tcl_DStringAppend(&ds, "\"", 1);
-	}
-    }
-    Tcl_DStringFree(linePtr);
-    Tcl_WinUtfToTChar(Tcl_DStringValue(&ds), Tcl_DStringLength(&ds), linePtr);
-    Tcl_DStringFree(&ds);
+	Tcl_DStringFree(linePtr);
+	Tcl_WinUtfToTChar(Tcl_DStringValue(&ds), Tcl_DStringLength(&ds), linePtr);
+	Tcl_DStringFree(&ds);
 }
 
 /*

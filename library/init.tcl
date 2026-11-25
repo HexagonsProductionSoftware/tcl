@@ -569,7 +569,7 @@ proc auto_execok name {
 	# Add an initial ; to have the {} extension check first.
 	set execExtensions [split ";$env(PATHEXT)" ";"]
     } else {
-	set execExtensions [list {} .com .exe .bat]
+	set execExtensions [list {} .com .exe .bat .cmd]
     }
 
     if {[lsearch -exact $shellBuiltins [string tolower $name]] != -1} {

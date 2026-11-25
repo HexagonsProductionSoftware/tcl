@@ -34,6 +34,8 @@ typedef VOID (WINAPI UTUNREGISTER)(HANDLE hModule);
 
 static HINSTANCE hInstance;	/* HINSTANCE of this DLL. */
 static int platformId;		/* Running under NT, or 95/98? */
+// Changed by RH 23-5-2007: running under XP embedded ?
+static int suiteMask;
 
 #ifdef HAVE_NO_SEH
 
@@ -433,11 +435,20 @@ TclWinInit(hInst)
     HINSTANCE hInst;		/* Library instance handle. */
 {
     OSVERSIONINFO os;
+	OSVERSIONINFOEX osvi;
+
+   // Try calling GetVersionEx using the OSVERSIONINFOEX structure.
+   // If that fails, try using the OSVERSIONINFO structure.
 
     hInstance = hInst;
     os.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
     GetVersionEx(&os);
     platformId = os.dwPlatformId;
+
+	ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
+    osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
+	GetVersionEx(&osvi);
+	suiteMask = osvi.wSuiteMask;
 
     /*
      * We no longer support Win32s, so just in case someone manages to
@@ -447,6 +458,8 @@ TclWinInit(hInst)
     if (platformId == VER_PLATFORM_WIN32s) {
 	panic("Win32s is not a supported platform");	
     }
+
+	
 
     tclWinProcs = &asciiProcs;
 }
@@ -475,6 +488,36 @@ int
 TclWinGetPlatformId()
 {
     return platformId;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * TclWinGetSuiteMask --
+ *
+ *	Identifies the product suites available on the system. 
+ *
+ * Results:
+ *	The return value can be a combination of the following values. Value Meaning :
+ *	    VER_SUITE_BACKOFFICE Microsoft BackOffice components are installed. 
+ *		VER_SUITE_BLADE Windows Server 2003, Web Edition is installed. 
+ *		VER_SUITE_DATACENTER Windows 2000 Datacenter Server or Windows Server 2003, Datacenter Edition is installed. 
+ *		VER_SUITE_ENTERPRISE Windows NT 4.0 Enterprise Edition, Windows 2000 Advanced Server, or Windows Server 2003, Enterprise Edition is installed. 
+ *		VER_SUITE_PERSONAL Windows XP Home Edition is installed. 
+ *		VER_SUITE_SMALLBUSINESS Microsoft Small Business Server is installed. 
+ *		VER_SUITE_SMALLBUSINESS_RESTRICTED Microsoft Small Business Server is installed with the restrictive client license in force. 
+ *		VER_SUITE_SECURITY_APPLIANCE Windows Server 2003 is installed as a hardened operating system as part of a security appliance. 
+ *		VER_SUITE_TERMINAL Terminal Services is installed. 
+ *
+ * Side effects:
+ *	None.
+ *
+ *----------------------------------------------------------------------
+ */
+int 
+TclWinGetSuiteMask()
+{
+	return suiteMask;
 }
 
 /*
@@ -509,6 +552,17 @@ TclWinNoBackslash(
 }
 
 /*
+ * The stack bound of each thread, which TclpCheckStackSpace() compares with.
+ */
+
+typedef struct ThreadSpecificData {
+    char *stackBound;		/* The lowest address at which this thread
+				 * may start another evaluation, or NULL if
+				 * not determined yet. */
+} ThreadSpecificData;
+static Tcl_ThreadDataKey dataKey;
+
+/*
  *----------------------------------------------------------------------
  *
  * TclpCheckStackSpace --
@@ -520,7 +574,7 @@ TclWinNoBackslash(
  *	1 if there is enough stack space to continue; 0 if not.
  *
  * Side effects:
- *	None.
+ *	Determines the stack bound of the thread on the first call.
  *
  *----------------------------------------------------------------------
  */
@@ -528,113 +582,57 @@ TclWinNoBackslash(
 int
 TclpCheckStackSpace()
 {
-
-#if defined(HAVE_NO_SEH) && !defined(__WIN64__)
-    EXCEPTION_REGISTRATION registration;
-#endif
-    int retval = 0;
+    ThreadSpecificData *tsdPtr = TCL_TSD_INIT(&dataKey);
+    char *here = (char *) &tsdPtr;
 
     /*
      * We can recurse only if there is at least TCL_WIN_STACK_THRESHOLD
-     * bytes of stack space left.  alloca() is cheap on windows; basically
-     * it just subtracts from the stack pointer causing the OS to throw an
-     * exception if the stack pointer is set below the bottom of the stack.
+     * bytes of stack space left. As in Tcl 8.5 (TclpGetCStackParams), the
+     * address of a local variable is compared with a bound computed from
+     * the base of the stack. This used to probe the stack with alloca() in
+     * an SEH block. But a probe that reached the end of the stack used up
+     * the guard page, after which the check let Tcl recurse deeper, and a
+     * probe that ended exactly at a page boundary was followed by a call
+     * that overflowed the stack outside the SEH block. On Win64, either
+     * crashed stack.test.
      */
 
-#ifdef HAVE_NO_SEH
-#   ifdef __WIN64__
+    if ((tsdPtr->stackBound == NULL) || (here < tsdPtr->stackBound)) {
+	SYSTEM_INFO si;
+	MEMORY_BASIC_INFORMATION mbi;
 
-    /* TODO: How to call allocal on Win64? */
-    retval = 1;
+	/*
+	 * Either we haven't determined the stack bound in this thread, or
+	 * else we are below the bound that we determined: find the bound
+	 * of the stack we are on.
+	 */
 
-#   else
-    __asm__ __volatile__ (
+	GetSystemInfo(&si);
+	if (VirtualQuery((LPCVOID) here, &mbi, sizeof(mbi)) == 0) {
+	    /*
+	     * For some reason, the system didn't let us query the stack.
+	     * Nevertheless, we got here and haven't blown up yet. Don't
+	     * update the bound; without one, take the base of the current
+	     * page of the stack.
+	     */
 
-        /*
-         * Construct an EXCEPTION_REGISTRATION to protect the
-         * call to __alloca
-         */
-        "leal   %[registration], %%edx"         "\n\t"
-        "movl   %%fs:0,         %%eax"          "\n\t"
-        "movl   %%eax,          0x0(%%edx)"     "\n\t" /* link */
-        "leal   1f,             %%eax"          "\n\t"
-        "movl   %%eax,          0x4(%%edx)"     "\n\t" /* handler */
-        "movl   %%ebp,          0x8(%%edx)"     "\n\t" /* ebp */
-        "movl   %%esp,          0xc(%%edx)"     "\n\t" /* esp */
-        "movl   %[error],       0x10(%%edx)"    "\n\t" /* status */
-        
-        /*
-         * Link the EXCEPTION_REGISTRATION on the chain
-         */
-        "movl   %%edx,          %%fs:0"         "\n\t"
+	    if (tsdPtr->stackBound == NULL) {
+		tsdPtr->stackBound = (char *)
+			((UINT_PTR) here & ~(UINT_PTR) (si.dwPageSize - 1));
+	    }
+	} else {
+	    /*
+	     * The allocation base of the stack has to be advanced by one
+	     * page (to allow for the guard page maintained in the C runtime)
+	     * and then by TCL_WIN_STACK_THRESHOLD (to allow for the amount
+	     * of stack that Tcl needs).
+	     */
 
-        /*
-         * Attempt a call to __alloca, to determine whether there's
-         * sufficient memory to be had.
-         */
-
-        "movl   %[size],        %%eax"          "\n\t"
-        "pushl  %%eax"                          "\n\t"
-        "call   __alloca"                       "\n\t"
-
-        /*
-         * Come here on a normal exit. Recover the EXCEPTION_REGISTRATION
-         * and store a TCL_OK status
-         */
-        "movl   %%fs:0,         %%edx"          "\n\t"
-        "movl   %[ok],          %%eax"          "\n\t"
-        "movl   %%eax,          0x10(%%edx)"    "\n\t"
-        "jmp    2f"                             "\n"
-
-        /*
-         * Come here on an exception. Get the EXCEPTION_REGISTRATION
-         * that we previously put on the chain.
-         */
-        "1:"                                    "\t"
-        "movl   %%fs:0,         %%edx"          "\n\t"
-        "movl   0x8(%%edx),     %%edx"          "\n\t"
-        
-        /* 
-         * Come here however we exited.  Restore context from the
-         * EXCEPTION_REGISTRATION in case the stack is unbalanced.
-         */
-        
-        "2:"                                    "\t"
-        "movl   0xc(%%edx),     %%esp"          "\n\t"
-        "movl   0x8(%%edx),     %%ebp"          "\n\t"
-        "movl   0x0(%%edx),     %%eax"          "\n\t"
-        "movl   %%eax,          %%fs:0"         "\n\t"
-        
-        :
-        /* No outputs */
-        :
-        [registration]  "m"     (registration),
-        [ok]            "i"     (TCL_OK),
-        [error]         "i"     (TCL_ERROR),
-        [size]          "i"     (TCL_WIN_STACK_THRESHOLD)
-        :
-        "%eax", "%ebx", "%ecx", "%edx", "%esi", "%edi", "memory"
-        );
-    retval = (registration.status == TCL_OK);
-
-#   endif
-#else /* !HAVE_NO_SEH */
-    __try {
-#ifdef HAVE_ALLOCA_GCC_INLINE
-        __asm__ __volatile__ (
-            "movl  %0, %%eax" "\n\t"
-            "call  __alloca" "\n\t"
-            :
-            : "i"(TCL_WIN_STACK_THRESHOLD)
-            : "%eax");
-#else
-        alloca(TCL_WIN_STACK_THRESHOLD);
-#endif /* HAVE_ALLOCA_GCC_INLINE */
-        retval = 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-#endif /* HAVE_NO_SEH */
-
-    return retval;
+	    tsdPtr->stackBound = (char *) mbi.AllocationBase
+		    + si.dwPageSize + TCL_WIN_STACK_THRESHOLD;
+	}
+    }
+    return (here >= tsdPtr->stackBound);
 }
 
 /*

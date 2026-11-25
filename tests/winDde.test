@@ -50,6 +50,10 @@ proc createChildProcess { ddeServerName } {
     }
     puts $f [list dde servername $ddeServerName]
     puts $f {
+	# If an error occurs during the tests, this process may end up not
+	# being closed down. To deal with this, stop waiting after 30 s (as
+	# in Tcl 8.5).
+	after 30000 {set done 1}
         after 200 {set ready 1}
         vwait ready
 	puts ready
@@ -59,11 +63,32 @@ proc createChildProcess { ddeServerName } {
 	exit
     }
     close $f
-    
+
+    # Wait for "ready" in the event loop, not in a blocking gets: [dde
+    # servername] in the child sends WM_DDE_INITIATE to every top-level
+    # window, and each window of a process that does not process its
+    # messages costs that a second. Give up after 30 s.
     set f [open |[list [interpreter] $::scriptName] r]
-    fconfigure $f -buffering line -blocking 1
-    gets $f
+    fconfigure $f -buffering line -blocking 0
+    set ::childState ""
+    fileevent $f readable [list childReadable $f]
+    set timer [after 30000 {set ::childState "timed out"}]
+    vwait ::childState
+    after cancel $timer
+    fileevent $f readable {}
+    fconfigure $f -blocking 1
+    if {$::childState ne "ready"} {
+	error "DDE child $ddeServerName did not get ready: $::childState"
+    }
     return $f
+}
+
+proc childReadable {f} {
+    if {[gets $f line] >= 0} {
+	set ::childState $line
+    } elseif {[eof $f]} {
+	set ::childState "exited"
+    }
 }
 
 # -------------------------------------------------------------------------

@@ -65,7 +65,7 @@ the build instructions.
 #		Sets where to install Tcl from the built binaries.
 #		C:\Progra~1\Tcl is assumed when not specified.
 #
-#	OPTS=static,msvcrt,staticpkg,threads,symbols,profile,loimpact,none
+#	OPTS=static,msvcrt,staticpkg,threads,symbols,pdbs,profile,loimpact,none
 #		Sets special options for the core.  The default is for none.
 #		Any combination of the above may be used (comma separated).
 #		'none' will over-ride everything to nothing.
@@ -82,6 +82,8 @@ the build instructions.
 #		threads =  Turns on full multithreading support.
 #		thrdalloc = Use the thread allocator (shared global free pool).
 #		symbols =  Adds symbols for step debugging.
+#		pdbs	=  Build a release version with a program database
+#			   (.pdb) for each binary.
 #		profile =  Adds profiling hooks.  Map file is assumed.
 #		loimpact =  Adds a flag for how NT treats the heap to keep memory
 #			   in use, low.  This is said to impact alloc performance.
@@ -323,16 +325,21 @@ cdebug	= -O2 $(OPTIMIZATIONS)
 !else
 cdebug	=
 !endif
-!else if "$(MACHINE)" == "IA64" || "$(MACHINE)" == "AMD64"
-### Warnings are too many, can't support warnings into errors.
-cdebug	= -Zi -Od $(DEBUGFLAGS)
+!if $(SYMBOLS)
+cdebug	= $(cdebug) -Zi
+!endif
 !else
-cdebug	= -Zi -WX $(DEBUGFLAGS)
+### Warnings are too many, can't support warnings into errors. With current
+### compilers this holds for IX86 as well: the UCRT declares strtoll and
+### strtoull, which tclWinPort.h declares again (C4273).
+cdebug	= -Zi -Od $(DEBUGFLAGS)
 !endif
 
 ### Declarations common to all compiler options
 cwarn = -D _CRT_SECURE_NO_DEPRECATE -D _CRT_NONSTDC_NO_DEPRECATE
-cflags = -nologo -c $(COMPILERFLAGS) $(cwarn) -Fp$(TMP_DIR)^\
+### -Fd: the compiler's program database goes with the objects, not in the
+### current directory that all builds share.
+cflags = -nologo -c $(COMPILERFLAGS) $(cwarn) -Fp$(TMP_DIR)\ -Fd$(TMP_DIR)^\
 
 !if $(FULLWARNINGS)
 cflags = $(cflags) -W4
@@ -369,6 +376,9 @@ TCL_CFLAGS	= $(BASE_CFLAGS) $(OPTDEFINES)
 ldebug	= -debug -debugtype:cv
 !else
 ldebug	= -release -opt:ref -opt:icf,3
+!if $(SYMBOLS)
+ldebug	= $(ldebug) -debug -debugtype:cv
+!endif
 !endif
 
 ### Declarations common to all linker options
@@ -652,10 +662,15 @@ $(TMP_DIR)\tclWinDde.obj: $(WINDIR)\tclWinDde.c
 
 ### The following objects are part of the stub library and should not
 ### be built as DLL objects.  -Zl is used to avoid a dependancy on any
-### specific C run-time.
+### specific C run-time. -Z7 instead of -Zi keeps the debug information in
+### the object, so that programs linking the stub library do not look for
+### the compiler's program database (LNK4099). Without -GL, so that it can
+### be linked by other compiler versions too (C1047).
+
+STUB_CDEBUG = $(cdebug:-Zi=-Z7)
 
 $(TMP_DIR)\tclStubLib.obj: $(GENERICDIR)\tclStubLib.c
-	$(cc32) $(cdebug) $(cflags) -Zl -DSTATIC_BUILD $(TCL_INCLUDES) -Fo$@ $?
+	$(cc32) $(STUB_CDEBUG:-GL=) $(cflags) -Zl -DSTATIC_BUILD $(TCL_INCLUDES) -Fo$@ $?
 
 
 #---------------------------------------------------------------------
